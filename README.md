@@ -34,6 +34,7 @@
 | **预处理** | 尖峰（宇宙射线）去除、基线校正、平滑、导数、归一化、拉曼位移校准 |
 | **统计分析** | 层次聚类 + PCA、二维成像热图、平均/相减、谱段替换、交互式 A−k·B 找平 |
 | **多谱对照** | **瀑布图**（纵向错开，看有哪些峰）+ **多数据图叠加**（按 stacked spectra 排布：各条**上下错开、谱线分开**，每条一色带图例；**峰位跨谱合并，一个峰只画一条虚线、只标一个平均波数**；**先预览、左键加峰 / 右键删峰，确认后再导出**；横坐标取各条**交集**，可导出 PNG） |
+| **图例摆放** | **几条谱线就列几条**（不再只列前 12 条），放不下自动分列；图例画在**绘图区外面**（默认右侧留白），谱线再密也不遮挡；位置可选右侧留白 / 上方 / 下方 / 图内自由位置 / 不显示，也能在预览窗口里**按住图例直接拖**，位置记住、导出沿用 |
 | **批量与报告** | 整目录批处理 + 汇总表、自包含 HTML 分析报告（图片内嵌，可打印成 PDF） |
 
 <table>
@@ -51,7 +52,7 @@
 
 <img src="docs/example_overlay.png" alt="多数据图叠加">
 
-<sub><b>多数据图叠加</b> — 4 条光谱按 stacked spectra 上下错开、谱线分开，每条一色；峰位跨谱合并后<b>一个峰只画一条虚线、只标一个平均波数</b>。打开先出预览窗口，<b>左键加峰、右键删峰</b>，确认后再导出 PNG</sub>
+<sub><b>多数据图叠加</b> — 4 条光谱按 stacked spectra 上下错开、谱线分开，每条一色；峰位跨谱合并后<b>一个峰只画一条虚线、只标一个平均波数</b>。打开先出预览窗口，<b>左键加峰、右键删峰</b>，确认后再导出 PNG；<b>图例画在绘图区右侧的留白里</b>，谱线再密也不遮挡，还能直接拖到别处</sub>
 
 </div>
 
@@ -212,11 +213,12 @@ The GUI, CLI, reports and manuals are **fully bilingual (Chinese / English)**.
 | **Conversion** | `.jws` / CSV / SPC / JCAMP-DX / TXT → CSV, **Excel with embedded chart**, PNG plot, peak table, JCAMP-DX |
 | **Peak analysis** | automatic peak detection with position labels (**each peak gets a dashed line down to the x axis**), **right-click to delete a wrong peak — automatic ones included — and restore them all with one click**, manual annotation, Gaussian / Lorentzian / pseudo-Voigt fitting, peak-position search; peak values can be hidden |
 | **Unknown spectra** | identify a spectrum whose mineral you do not know by matching its peaks against a whole reference library, with confidence ranking and a peak-by-peak comparison; **batch identification** runs a whole folder and gives the best candidate per spectrum |
-| **Reference libraries** | search ROD online, bulk-fetch RRUFF packages (Raman / IR / XRD / chemistry), export them into a local library; **downloads resume after a drop, use 4 parallel connections with automatic retries, run in the background with a working Cancel button, and show an estimated time based on your own measured speed** |
+| **Reference libraries** | search ROD online, bulk-fetch RRUFF packages (Raman / IR / XRD / chemistry), export them into a local library; **downloads resume after a drop, use 32 parallel connections with work-stealing scheduling and automatic retries, accept a proxy, run in the background with a working Cancel button, and show an estimated time based on your own measured speed** |
 | **Pairing** | measured ↔ reference pairing (manual or automatic) with peak-match F1, correlation, spectral angle, and a comparison report figure; **batch pairing** screens a whole folder against a reference set and **puts the mismatches first** (score, F1, correlation and more — the reading is advisory, you decide) |
 | **Preprocessing** | spike (cosmic ray) removal, baseline correction, smoothing, derivative, normalization, Raman shift calibration |
 | **Statistics** | hierarchical clustering + PCA, 2D imaging heat map, average / subtract, range replacement, interactive A−k·B flattening |
 | **Multi-spectrum comparison** | **waterfall** (offset stacks, to see *which* peaks are there) + **multi-dataset overlay** (stacked-spectra layout: curves **offset and separated**, one colour each with a legend; **peaks merged across datasets — one dashed line and one averaged value per peak**; **preview first, left-click to add / right-click to remove peaks, export only after you confirm**; x axis is the **intersection** of all ranges) |
+| **Legends** | **one entry per curve** (no longer capped at the first 12), wrapping into extra columns when needed; the legend is drawn **outside the plot area** (right-hand gutter by default) so dense curves never cover it; pick right gutter / above / below / free position inside / hidden, or **drag the legend** in the preview window — the position is remembered and reused for exports |
 | **Batch & reports** | whole-folder batch conversion with a summary table, self-contained HTML report (images embedded, printable to PDF) |
 
 ### Quick start

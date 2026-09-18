@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """把当前源码 + 绿色版压缩包发布到 GitHub 仓库。
 
 用法：
@@ -33,8 +33,8 @@ API = "https://api.github.com"
 DESC = ("Raman Spectrum Toolkit: convert JASCO .jws / CSV / SPC / JCAMP-DX spectra to CSV, "
         "Excel, PNG; detect, delete and fit Raman peaks, assign mineral bands, search ROD / "
         "RRUFF reference libraries, identify unknown spectra one by one or a whole folder in "
-        "batch, pair measured spectra against a reference set, overlay multiple datasets. "
-        "Bilingual EN/ZH Windows desktop tool. 拉曼光谱工具：转换 · 分析 · 矿物鉴定")
+        "batch, pair measured spectra against a reference set, overlay multiple datasets with "
+        "draggable legends. Bilingual EN/ZH Windows desktop tool. 拉曼光谱工具：转换 · 分析 · 矿物鉴定")
 
 TOPICS = ["raman-spectroscopy", "raman", "spectroscopy", "spectrum-converter", "jasco",
           "jws", "mineral-identification", "rruff", "rod-database", "peak-fitting",
@@ -53,7 +53,7 @@ FILES = [
     "tests/test_output_english.py", "tests/test_cli_english.py",
     "tests/test_dialog_layout.py", "tests/test_overlay_dash.py",
     "tests/test_overlay_preview.py", "tests/test_batch_pair_identify.py",
-    "tests/test_download_engine.py",
+    "tests/test_download_engine.py", "tests/test_legend_layout.py",
 ]
 
 TOK = None
@@ -184,8 +184,8 @@ def main():
     _st, tree = call("POST", "%s/repos/%s/%s/git/trees" % (API, OWNER, REPO),
                      {"tree": blobs})
     _st, commit = call("POST", "%s/repos/%s/%s/git/commits" % (API, OWNER, REPO),
-                       {"message": "%s 下载提速：动态领活 + 32 路并发 + 断点续传 + 代理，"
-                                   "界面不再假死" % tag,
+                       {"message": "%s 图例摆放：几条谱线列几条、改到绘图区外不压谱线，"
+                                   "可在预览窗口拖动并记住位置" % tag,
                         "tree": tree["sha"],
                         "parents": ([parent] if parent else []),
                         "author": {"name": login, "email": email},
@@ -243,60 +243,47 @@ JASCO `.jws` 光谱转换 · 拉曼峰分析 · 矿物鉴定（中英双语，Wi
 免安装、不写注册表，所有数据都写在解压目录的 `工具数据/` 里。
 
 ### 本次新增
-- **下载数据库又快又稳**（针对“总是崩溃和下载缓慢”）。
-  先实测定位：rruff.net 单连接只有约 0.09 MB/s 且还会往下掉，
-  这条跨境链路 ping 丢包 25%、RTT 236 ms；而旧实现**全程把界面堵死**，
-  227 MB 的包要 40 多分钟、中途一断就从头再来。
-  - **界面不再假死**：下载改后台线程 + 进度条 + 已下/总数 + 实时速率 +
-    剩余时间 + 【取消】按钮（旧代码下载时只调 `update_idletasks()`，
-    不处理鼠标和关闭事件，整段时间窗口点不动、关不掉）。
-  - **断点续传**：按分片写 `.part0/.part1…`，取消 / 掉线 / 强杀都不会白费；
-    切法记在 `.part.meta` 里，**中途改并发数也能接着续传**。
-  - **并发默认 32 路**（1~128 可调）。实测吞吐几乎正比于同时在跑的连接数：
-    1 路 0.03、8 路 0.32、32 路 0.89、64 路 1.28、96 路 1.45 MB/s，
-    服务器全程没有拒绝。对话框里能改，命令行 `--dl-conns 96` 也行。
-  - **动态领活（work-stealing）**：不再“一条连接固定一段、平均分”，
-    而是切成小段排队、**谁下完谁再领**。实测 33 MB 的包 32 等分里
-    最快段 4.3 s、最慢段 79 s——静态均分等于花 79 s 等一条卡住的连接；
-    真实链路同一时段交错 A/B（12 MB 包、都是 32 路）：
-    **静态均分平均 39.1 s → 动态领活平均 23.2 s，快 1.69 倍**。
-  - **代理支持**：可填代理地址（留空沿用 Windows 系统代理），
-    命令行 `--proxy`。丢包严重的链路上走代理 / VPN 往往比堆并发更快。
-  - **自动重试**：断线按 1.5×n 秒退避并从断点继续；服务器返回 429/503
-    会识别出来并提示“把并发调小些”。
-  - **完整性校验（修掉一个真 bug）**：以前读了 `Content-Length` 却只用来显示，
-    `os.replace()` 无条件执行——**被截断的 zip 会被当成“下载成功”并标记“已下载”**，
-    直到建索引时才抛 BadZipFile，看起来就像又崩了一次。
-    现在长度对不上就不转正、保留分片，下完再验一次 zip 能否打开。
-  - **预计耗时**：数据包表里按你上次实测速率估算（越用越准），
-    下 ≥50 MB 的大包前弹窗告知时长。
-  - ROD 路径同步加固：请求带重试与体积上限、落库改**原子写**、
-    按 JDX 的 `NPOINTS` 判断是否被截断。
+- **图例不再压谱线，位置也由你定**。
+  以前图例固定画在**绘图区里的右上角**，靠一层白底卡片“盖住但读得清”——
+  堆叠图上曲线从下到上铺满整幅，图例必然压掉一块谱线。
+  - **位置可选**：右侧留白（默认）/ 上方 / 下方 / 图内自由位置 / 不显示；
+    选“上方”“下方”时绘图区、标题、横坐标标题会一起让开，互不叠字。
+  - **可以直接拖**：在叠加图预览窗口里按住图例拖到任意位置，松手即定位；
+    按在图上别处仍然是“加峰位”，两种操作互不干扰（拖动时有虚线预览框）。
+  - **位置会记住**：写进设置文件，导出 PNG 和下次预览都用同一个位置；
+    【设置 → 高级设置 → 图幅与图例】里也能选。
+  - **条目数不再被砍**：以前“图例只列前 12 条”，20 条谱线就有 8 条对不上号。
+    现在**几条谱线就列几条**，竖着放不下自动分列（最多 4 列），
+    实在放不下才省略并写明“还有 N 条没列”。
+  - 对所有出图生效：叠加图、瀑布图、鉴定对比图、配对对比报告、主界面预览，
+    命令行 `--legend-pos right|top|bottom|inside|none`。
+  - 修掉连带 bug：配对对比报告选“下方”时排名表让开了、
+    但“最佳配对峰位对照”表没跟着让，两张表会叠字——现在一起下移。
 
 ### 顺带回顾上一版
-- **批量配对**：一次拿一整个文件夹的实测谱去配一组参考谱，专门用来找“对不上的那几条”。
-  菜单【分析工具 → 配对比较（手动 / 自动）→ 批量配对（文件夹 × 参考谱）…】，
+- **下载数据库又快又稳**：后台下载 + 进度条 + 实时速率 + 剩余时间 + 取消；
+  断点续传（切法记在 `.part.meta`，中途改并发数也能续）；并发默认 32 路（1~128）；
+  **动态领活**消除“慢尾”；可填代理；自动重试；长度校验。
+  真实链路同一时段 A/B：静态均分 39.1 s → 动态领活 23.2 s，快 1.69 倍。
+- **批量配对**：一个文件夹 × 一组参考谱，**对不上的排在最前面**；
   命令行 `--pair-batch 文件夹 [--pair-ref 参考谱文件夹]`。
-  汇总表**按综合分升序排：对不上的排在最前面**。
-- **批量鉴定**：菜单【分析工具 → 批量鉴定（文件夹逐条鉴定）…】，
-  命令行 `--identify-batch 文件夹 [--identify-top 5]`。
-- **汇总表只给辅助数据，不替你下结论**：综合分（与「未知谱鉴定」同一口径）、
-  F1、强峰命中、命中 / 实测 / 参考峰数、平均偏差、相关系数、谱角、偶然概率、
-  领先第二名；「参考判读」只按分数给提示，**最终是哪个物相由你自己核对峰位与谱型来判**。
-- 输出汇总表 `CSV` + 汇总报告 `HTML`，放在“工具数据/分析结果”。
-- 叠加图已改成「先预览、左键加峰 / 右键删峰、确认后再导出」。
+- **批量鉴定**：命令行 `--identify-batch 文件夹 [--identify-top 5]`。
+  汇总表只给辅助数据（综合分 / F1 / 强峰命中 / 相关系数 / 谱角 / 领先分），
+  判读只是提示，**最终是哪个物相由你自己核对峰位与谱型来判**。
+- 叠加图「先预览、左键加峰 / 右键删峰、确认后再导出」。
 
 ### 修复
-- 鉴定结论里“仅领先第二名”偶尔显示**负数**——现在夹到 0。
-- 配对与鉴定统一到同一套打分口径。
+- 配对对比报告选“下方”图例时，排名表与峰位对照表叠字。
+- 鉴定结论里“仅领先第二名”偶尔显示负数——现在夹到 0。
 - RRUFF 数据包对话框的表头在英文模式下没有翻译。
 
 ### 画质与稳定性
-- 九套自测合计 **246 项全部通过**，其中新增的 `tests/test_download_engine.py`
-  （45 项）用一个可“说谎”的本机 HTTP 服务器复现真实故障——传一半断线、
-  `Content-Length` 报全长却只发一半、完全不支持 Range——逐项验证续传、
-  跨运行续传、改并发数续传、截断必须报错且**不生成目标文件**、取消及时且线程不抛未捕获异常。
-- 中英两份说明书（`使用说明.txt` / `User_Guide.txt`）同步更新至 2.4。
+- 十套自测合计 **308 项全部通过**，其中新增的 `tests/test_legend_layout.py`
+  （62 项）逐项检查 right/top/bottom 的图例框与绘图区**零重叠**、
+  inside 落在图内且听比例坐标、40 条谱线自动分列后条目齐全、
+  拖动往返位置不漂、图例位置能存能读能还原、配对报告两张表不重叠，
+  并在真实 Tk 窗口里**模拟一次鼠标拖动**，验证位置被写进设置且导出沿用同一位置。
+- 中英两份说明书（`使用说明.txt` / `User_Guide.txt`）同步更新至 2.5。
 
 ### 已知口径（不是 bug）
 - 只识别到 **1 个峰**的谱，F1 一律记 0（命中 < 2 不算识别），综合分因此封顶 50、

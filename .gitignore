@@ -25,3 +25,6 @@ _verify*/
 _pkg/
 assets/_shot*.png
 assets/_shot.ps1
+
+# 发布令牌（永远不要提交）
+_gh_token*.txt

@@ -182,6 +182,10 @@ _PLOT_DEFAULT = {
     "merge_peak_labels": False,
     "peak_merge_tol": None,
     "peak_marks": None,
+    # 图例位置：right（绘图区右侧留白，默认，永不压谱线）/ top / bottom /
+    # inside（图内自由位置，legend_xy 是比例坐标，可在叠加图预览窗口里拖）/ none
+    "legend_pos": "right",
+    "legend_xy": None,
 }
 
 
@@ -1626,6 +1630,20 @@ def _png_text(draw, font, xy, text, anchor, fill=(70, 70, 70)):
         draw.text(xy, text, font=font, fill=fill)
 
 
+def _png_measure(draw, font):
+    """拿一个“量文字宽度”的小函数（量不到就按汉语/拉丁混排估个大概）。
+
+    中英混排时按 1 个字符 9 px 估是够用的：估宽了最多让图例条带宽一点，
+    估窄了才会压到谱线，所以宁可估宽。
+    """
+    def measure(text):
+        try:
+            return float(draw.textlength(text, font=font))
+        except Exception:
+            return 9.0 * len(text)
+    return measure
+
+
 def _png_dashed_v(draw, x, y_from, y_to, color, dash=7, gap=5, width=1):
     """在 x 处画一条 y_from → y_to 的竖直虚线，用来把峰位波长引到横坐标轴上。"""
     lo, hi = (y_from, y_to) if y_from <= y_to else (y_to, y_from)
@@ -1698,6 +1716,254 @@ def overlay_color(k):
     return "#%02x%02x%02x" % (int(r2 * 255), int(g2 * 255), int(b2 * 255))
 
 
+# ---------------------------------------------------------------------------
+# 图例摆放
+#   以前图例画在绘图区里的右上角，谱线一密（尤其堆叠图，曲线从下到上铺满整幅）
+#   就压在谱线上；加白底卡片也只是“盖住但读得清”，谱线本身还是被吃掉了。
+#   现在按 legend_pos 摆：
+#     right（默认）绘图区右侧的留白里竖排，永不压谱线；放不下就自动分列；
+#     top / bottom 绘图区上/下的留白里横排；
+#     inside       图内自由位置（legend_xy，比例坐标），白底卡片，可在预览窗口里拖；
+#     none         不画图例。
+#   条目不再截成“只列前 12 条”——谱线多少条就列多少条，空间不够才分列，
+#   实在放不下才省略，并明确写出“还有 N 条没列”。
+# ---------------------------------------------------------------------------
+LEGEND_ROW_H = 28          # 每行高度
+LEGEND_SWATCH = 32         # 色块（短线）长度
+LEGEND_TEXT_GAP = 10       # 色块与文字间距
+LEGEND_PAD = 10            # 图例块内边距
+LEGEND_COL_GAP = 24        # 两列之间的间距
+LEGEND_GUTTER_GAP = 16     # 绘图区与图例留白之间的间距
+LEGEND_LABEL_MAX = 30      # 标签最多显示几个字
+LEGEND_LABEL_MIN = 10      # 空间不够时最多截到几个字
+LEGEND_MAX_COLUMNS = 4     # 最多分几列
+LEGEND_GUTTER_SHARE = 1.0 / 3.0   # 右侧条带最多占整幅宽的 1/3
+LEGEND_STRIP_SHARE = 0.34         # 上/下条带最多占绘图区高的 34%
+LEGEND_POSITIONS = ("right", "top", "bottom", "inside", "none")
+# legend_xy 是图例框左上角在绘图区里的比例坐标（0=左/上，1=右/下）
+LEGEND_XY_DEFAULT = (0.62, 0.05)
+# bottom 位置要把图例压到横坐标标题下面，这段是不含图例的最小下边距
+LEGEND_BOTTOM_LABELS = 106
+LEGEND_MB_BASE = 120       # 渲染器原本的下边距，算 bottom 要加多少时用
+
+
+def legend_label(label, limit=LEGEND_LABEL_MAX):
+    """图例标签：去换行、去过长空白，再截断。"""
+    text = " ".join(str(label or "").split())
+    if len(text) > limit:
+        text = text[:limit - 1] + "…"
+    return text or "(未命名)"
+
+
+def legend_entries(series, measure, max_text_width=None, chars=LEGEND_LABEL_MAX):
+    """图例条目 [(文字, 颜色, 文字宽度)]。
+
+    几条谱就给几条图例（不再限 12 条）；chars 控制标签最多几个字，
+    max_text_width 再按像素宽继续截，保证图例不把绘图区挤得太窄。
+    """
+    rows = []
+    for item in series:
+        label, color = item[0], item[3]
+        text = legend_label(label, chars)
+        if max_text_width:
+            while len(text) > LEGEND_LABEL_MIN and measure(text) > max_text_width:
+                text = text[:-2] + "…"
+        rows.append((text, color, measure(text)))
+    return rows
+
+
+def legend_cell_width(entries):
+    """一格图例（色块 + 文字 + 内边距）有多宽。"""
+    if not entries:
+        return 0
+    widest = max(w for _t, _c, w in entries)
+    return LEGEND_SWATCH + LEGEND_TEXT_GAP + widest + LEGEND_PAD * 2
+
+
+def legend_reserve(entries, pos, plot_w, plot_h):
+    """top / bottom 位置要从绘图区**外面**占掉多少空间。
+
+    返回 (右侧, 上方, 下方, avail)。avail 是排图例时真正可用的 (宽, 高)，
+    要原样交给 legend_place——否则两处各算一遍行数会对不上（图例跑到画布外）。
+    right 的预留由 legend_fit 自己算（要兼顾标签截断与分列）。
+    """
+    if not entries or pos not in ("top", "bottom"):
+        return 0, 0, 0, (0, 0)
+    cell = legend_cell_width(entries)
+    cols = max(1, min(LEGEND_MAX_COLUMNS,
+                      int((plot_w + LEGEND_COL_GAP) // (cell + LEGEND_COL_GAP)) or 1))
+    rows = -(-len(entries) // cols)
+    # 条带最多占绘图区高的一部分，剩下的条目交给“还有 N 条”那行
+    rows = min(rows, max(1, int(plot_h * LEGEND_STRIP_SHARE // LEGEND_ROW_H)))
+    box_h = rows * LEGEND_ROW_H + 2 * LEGEND_PAD
+    if pos == "top":
+        # 图例排在标题之下、绘图区之上，整条往上撑
+        return 0, box_h + LEGEND_GUTTER_GAP, 0, (plot_w, rows * LEGEND_ROW_H)
+    # 图例排在横坐标标题之下：先把标题那一段让出来，再放图例
+    add = max(0, LEGEND_BOTTOM_LABELS + box_h + LEGEND_GUTTER_GAP - LEGEND_MB_BASE)
+    return 0, 0, add, (plot_w, rows * LEGEND_ROW_H)
+
+
+def legend_place(entries, pos, ml, mt, pw, ph, xy=None, avail=None):
+    """把图例条目排到具体坐标上。
+
+    返回 (rows, hidden, box)：
+      rows   [(文字, 颜色, 色块起点 x, 行中线 y)]
+      hidden 没排下的条数
+      box    图例外框 (x0, y0, x1, y1)；inside 模式画白底、也用它判定拖动
+      box 为 None 表示不画。
+    """
+    if not entries or pos == "none":
+        return [], len(entries), None
+    cell = legend_cell_width(entries)
+    n = len(entries)
+    avail_w, avail_h = avail if avail else (0, 0)
+
+    def pack(box_w, box_h, order):
+        cols = max(1, min(LEGEND_MAX_COLUMNS,
+                          int((box_w + LEGEND_COL_GAP) // (cell + LEGEND_COL_GAP)) or 1))
+        rows_max = max(1, int(box_h // LEGEND_ROW_H))
+        if order == "col":
+            rows = min(rows_max, n)
+            cols = min(cols, -(-n // rows))
+            used = min(n, rows * cols)
+            slots = [(i % rows, i // rows) for i in range(used)]
+        else:
+            cols = min(cols, n)
+            rows = min(rows_max, -(-n // cols))
+            used = min(n, rows * cols)
+            slots = [(i // cols, i % cols) for i in range(used)]
+        return slots, n - len(slots)
+
+    if pos == "right":
+        slots, hidden = pack(avail_w or pw, avail_h or ph, "col")
+        x0 = ml + pw + LEGEND_GUTTER_GAP
+        y0 = mt
+    elif pos in ("top", "bottom"):
+        slots, hidden = pack(avail_w or pw, avail_h or ph, "row")
+        rows_n = (max(r for r, _c in slots) + 1) if slots else 1
+        box_h = rows_n * LEGEND_ROW_H + 2 * LEGEND_PAD
+        x0 = ml
+        y0 = (mt - LEGEND_GUTTER_GAP - box_h if pos == "top"
+              else mt + ph + LEGEND_BOTTOM_LABELS)   # bottom 排在横坐标标题下面
+    else:                                   # inside：图内自由位置
+        slots, hidden = pack(pw - 2 * LEGEND_PAD, ph - 2 * LEGEND_PAD, "col")
+        fx, fy = (xy or LEGEND_XY_DEFAULT)[:2]
+        cols = (max(c for _r, c in slots) + 1) if slots else 1
+        rows_n = (max(r for r, _c in slots) + 1) if slots else 1
+        bw = cols * cell + (cols - 1) * LEGEND_COL_GAP + 2 * LEGEND_PAD
+        bh = rows_n * LEGEND_ROW_H + 2 * LEGEND_PAD
+        x0 = min(max(ml + 4, ml + float(fx) * pw), max(ml + 4, ml + pw - bw - 4))
+        y0 = min(max(mt + 4, mt + float(fy) * ph), max(mt + 4, mt + ph - bh - 4))
+
+    rows_out = []
+    for idx, (r, c) in enumerate(slots):
+        text, color, _w = entries[idx]
+        cx = x0 + LEGEND_PAD + c * (cell + LEGEND_COL_GAP)
+        cy = y0 + LEGEND_PAD + r * LEGEND_ROW_H + LEGEND_ROW_H // 2
+        rows_out.append((text, color, cx, cy))
+    if not rows_out:
+        return [], n, None
+    cols = max(c for _r, c in slots) + 1
+    rows_n = max(r for r, _c in slots) + 1
+    box = (x0, y0,
+           x0 + cols * cell + (cols - 1) * LEGEND_COL_GAP + 2 * LEGEND_PAD,
+           y0 + rows_n * LEGEND_ROW_H + 2 * LEGEND_PAD)
+    return rows_out, hidden, box
+
+
+def legend_fit(series, measure, pos, width, plot_w, plot_h):
+    """给渲染器用的“一步到位”接口：算条目、算要预留的空间、算排版可用空间。
+
+    返回 (entries, reserve=(右,上,下), avail)，渲染器把尺寸定下来之后
+    再拿 avail 调 legend_place。
+
+    right 位置会尽量让**所有**谱线都有图例：先按最长标签试，条带超过整幅宽的
+    1/3 就把标签一点点截短、必要时再加一列，直到都能放下（实在不行才省略条目）。
+    """
+    if len(series) < 2 or pos == "none":
+        return [], (0, 0, 0), (0, 0)
+    if pos != "right":
+        entries = legend_entries(series, measure)
+        right, top, bottom, avail = legend_reserve(entries, pos, plot_w, plot_h)
+        return entries, (right, top, bottom), avail
+
+    n = len(series)
+    cap = max(LEGEND_SWATCH + LEGEND_TEXT_GAP + 2 * LEGEND_PAD + LEGEND_LABEL_MIN * 9,
+              int(width * LEGEND_GUTTER_SHARE))
+    rows_fit = max(1, int(plot_h // LEGEND_ROW_H))
+    best = None
+    for chars in range(LEGEND_LABEL_MAX, LEGEND_LABEL_MIN - 1, -1):
+        entries = legend_entries(series, measure, chars=chars)
+        cell = legend_cell_width(entries)
+        cols = min(LEGEND_MAX_COLUMNS, -(-n // rows_fit))
+        while cols > 1 and (cols * cell + (cols - 1) * LEGEND_COL_GAP
+                            + LEGEND_GUTTER_GAP > cap):
+            cols -= 1
+        best = (entries, cols, cell)
+        if cols * rows_fit >= n:       # 所有条目都排得下
+            break
+    entries, cols, cell = best
+    box = cols * cell + (cols - 1) * LEGEND_COL_GAP
+    return entries, (box + LEGEND_GUTTER_GAP, 0, 0), (box, plot_h)
+
+
+def legend_defaults():
+    """图例位置的全局默认（写在设置文件里，下次打开还是这个位置）。
+
+    返回 (pos, xy)；xy 是比例坐标 [fx, fy] 或 None。
+    """
+    data = _load_settings()
+    pos = str(data.get("legend_pos") or "").strip().lower()
+    if pos not in LEGEND_POSITIONS:
+        pos = "right"
+    xy = None
+    raw = str(data.get("legend_xy") or "").strip()
+    if raw:
+        try:
+            parts = [float(v) for v in raw.replace(";", ",").split(",")]
+            if len(parts) >= 2:
+                xy = [min(1.0, max(0.0, parts[0])), min(1.0, max(0.0, parts[1]))]
+        except ValueError:
+            xy = None
+    return pos, xy
+
+
+def save_legend_defaults(pos, xy=None):
+    """把图例位置写回设置文件（在预览窗口里拖完就存，下次打开还是这里）。"""
+    data = _load_settings()
+    data["legend_pos"] = str(pos if pos in LEGEND_POSITIONS else "right")
+    if xy:
+        data["legend_xy"] = "%.4f,%.4f" % (float(xy[0]), float(xy[1]))
+    else:
+        data.pop("legend_xy", None)
+    return _save_settings(data)
+
+
+def legend_hit(box, x, y):
+    """鼠标 (x, y) 是否点在图例外框里（用来判断要不要开始拖动）。"""
+    if not box:
+        return False
+    return box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
+
+def draw_legend(d, font, pos, rows, hidden, box, text_fill=(40, 40, 40)):
+    """画图例。inside 模式加一层白底卡片和淡边框，免得压在谱线上读不清。"""
+    if not rows or not box:
+        return
+    inside = pos == "inside"
+    if inside:
+        d.rectangle(list(box), fill=(255, 255, 255), outline=(216, 216, 216))
+    for text, color, cx, cy in rows:
+        d.line([(cx, cy), (cx + LEGEND_SWATCH, cy)], fill=color, width=4)
+        _png_text(d, font, (cx + LEGEND_SWATCH + LEGEND_TEXT_GAP,
+                            cy - 9), text, "la", fill=text_fill)
+    if hidden > 0:
+        tail = T("…还有 %d 条没列（把图例位置改到右侧留白，或把图放大）") % hidden
+        _png_text(d, font, (box[0] + LEGEND_PAD, box[3] - LEGEND_ROW_H + 4), tail, "la",
+                  fill=(150, 60, 60))
+
+
 def render_png(path, series, title, xlabel, ylabel, plot=None, width=None, height=None,
                return_geometry=False):
     if not _HAVE_PIL:
@@ -1723,7 +1989,19 @@ def render_png(path, series, title, xlabel, ylabel, plot=None, width=None, heigh
     f_tick = _png_font(18)
 
     ml = 140 if p["show_y_ticks"] else 105
-    mr, mt, mb = 60, 90, 120
+    mt_base, mb_base = 90, 120
+    mt, mb = mt_base, mb_base
+    base_pw = width - ml - 60
+    base_ph = height - mt - mb
+
+    # 图例先算好，再从绘图区**外面**留出空间；画在外面，谱线再密也压不到。
+    legend_pos = p["legend_pos"] if len(series) > 1 else "none"
+    entries, (l_right, l_top, l_bottom), l_avail = legend_fit(
+        series, _png_measure(d, f_tick), legend_pos, width, base_pw, base_ph)
+
+    mr = max(60, l_right)
+    mt += l_top
+    mb += l_bottom
     pw = width - ml - mr
     ph = height - mt - mb
 
@@ -1848,8 +2126,16 @@ def render_png(path, series, title, xlabel, ylabel, plot=None, width=None, heigh
                     _png_text(d, f_tick, (gx, ty), "%g" % round(mk["x"], 1),
                               "mt", fill=mark_color)
 
+    legend_rows, legend_hidden, legend_box = legend_place(
+        entries, legend_pos, ml, mt, pw, ph, xy=p["legend_xy"], avail=l_avail)
+    if legend_rows or legend_hidden:
+        # 画在绘图区外面（right / top / bottom）；inside 时是用户自己拖的位置，带白底
+        draw_legend(d, f_tick, legend_pos, legend_rows, legend_hidden, legend_box)
+
     if title and p["show_title"]:
-        _png_text(d, f_title, (ml + pw / 2, mt - 55), title, "ma", fill=(30, 30, 30))
+        # top 位置时图例占了标题下面那一带，标题留在最上面不跟图例叠
+        title_y = mt_base - 55 if (legend_pos == "top" and legend_rows) else mt - 55
+        _png_text(d, f_title, (ml + pw / 2, title_y), title, "ma", fill=(30, 30, 30))
     if xlabel:
         _png_text(d, f_lab, (ml + pw / 2, mt + ph + 70), xlabel, "ma", fill=(40, 40, 40))
     if ylabel:
@@ -1858,39 +2144,19 @@ def render_png(path, series, title, xlabel, ylabel, plot=None, width=None, heigh
         tmp = tmp.rotate(90, expand=True)
         img.paste(tmp, (12, int(mt + ph / 2 - tmp.height / 2)), tmp)
 
-    if len(series) > 1:
-        # 峰位标签压在图上缘（三层错位到 mt+72 左右），图例整体下移让开；
-        # 并给图例加一层白底卡片，堆叠图上图例难免压在谱线上，有底色才读得清。
-        ly = mt + (92 if (p["merge_peak_labels"] and len(series) > 1) else 12)
-        rows = []
-        for label, _xs, _ys, color in series[:12]:
-            rows.append((label[:28], color, ly))
-            ly += 28
-            if ly > mt + ph - 24:
-                break
-        if rows:
-            try:
-                tw = max(d.textlength(t, font=f_tick) for t, _c, _y in rows)
-            except Exception:
-                tw = 200
-            right = ml + pw - 10
-            left = right - tw - 46
-            d.rectangle([left - 6, rows[0][2] - 6, right + 4, rows[-1][2] + 24],
-                        fill=(255, 255, 255))
-            for text, color, yy in rows:
-                d.line([(left, yy + 9), (left + 36, yy + 9)], fill=color, width=4)
-                _png_text(d, f_tick, (left + 44, yy), text, "la", fill=(40, 40, 40))
-
     img.save(path, "PNG")
     if return_geometry:
-        # 把绘图区的实际位置回报给调用方，交互式预览要靠它把鼠标坐标换算成波数
+        # 把绘图区的实际位置回报给调用方：交互式预览靠它把鼠标坐标换算成波数，
+        # 也靠 legend_box / legend_pos 判断“点的是不是图例”，好让用户拖着放。
         return {"xmin": plot_xmin, "xmax": plot_xmax, "ml": ml, "pw": pw,
-                "mt": mt, "ph": ph, "width": width, "height": height}
+                "mt": mt, "ph": ph, "width": width, "height": height,
+                "legend_pos": legend_pos, "legend_box": legend_box,
+                "legend_rows": len(legend_rows)}
     return None
 
 
 def render_pair_report(path, target_name, target_xy, results, plot=None, tol=5.0,
-                       width=1700, height=1180):
+                       width=1700, height=1180, return_geometry=False):
     if not _HAVE_PIL:
         raise JwsError(T("导出报告图需要 Pillow 组件（pip install pillow）"))
     if not results:
@@ -1920,7 +2186,16 @@ def render_pair_report(path, target_name, target_xy, results, plot=None, tol=5.0
               % (target_name, best["name"], best["peak_score"], best["corr"], best["angle"]),
               "mm", fill=(80, 80, 80))
 
-    left, right, top, bottom = 110, width - 40, 130, 640
+    # 图例同样挪到绘图区外面：这两条线（实测 / 参考）铺满整幅，
+    # 压在图上必然被谱线穿过，读起来费劲。
+    legend_source = [(T("实测 ") + target_name, "", "", (200, 40, 40))]
+    if rsig is not None:
+        legend_source.append((T("参考 ") + best["name"], "", "", (30, 110, 200)))
+    legend_pos = p["legend_pos"]
+    entries, (l_right, l_top, l_bottom), l_avail = legend_fit(
+        legend_source, _png_measure(d, f_tick), legend_pos, width, width - 110 - 40, 510)
+    left, top, bottom = 110, 130 + l_top, 640
+    right = width - max(40, l_right)
     pw, ph = right - left, bottom - top
     xmin = min(txs) if rxs is None else min(min(txs), min(rxs))
     xmax = max(txs) if rxs is None else max(max(txs), max(rxs))
@@ -1982,17 +2257,14 @@ def render_pair_report(path, target_name, target_xy, results, plot=None, tol=5.0
             _png_text(d, f_tick, (gx, gy + 10), "%.6g" % round(pk["x"], 1), "mt",
                       fill=(20, 80, 170))
 
-    ly = top + 4
-    d.line([(right - 330, ly + 10), (right - 285, ly + 10)], fill=(200, 40, 40), width=4)
-    _png_text(d, f_tick, (right - 275, ly), (T("实测 ") + target_name)[:34], "la", fill=(40, 40, 40))
-    if rsig is not None:
-        ly += 26
-        d.line([(right - 330, ly + 10), (right - 285, ly + 10)], fill=(30, 110, 200), width=4)
-        _png_text(d, f_tick, (right - 275, ly), (T("参考 ") + best["name"])[:34], "la",
-                  fill=(40, 40, 40))
+    legend_rows, legend_hidden, legend_box = legend_place(
+        entries, legend_pos, left, top, pw, ph, xy=p["legend_xy"], avail=l_avail)
+    if legend_rows or legend_hidden:
+        draw_legend(d, f_tick, legend_pos, legend_rows, legend_hidden, legend_box)
 
-    # 排名表
-    ty = bottom + 110
+    # 排名表（bottom 位置时图例插在图上和表之间，两张表一起往下让开，别只挪一张）
+    table_top = bottom + 110 + l_bottom
+    ty = table_top
     _png_text(d, f_h, (60, ty), T("配对排名（共 %d 条参考谱，按峰位匹配 F1 排序）") % len(results),
               "la", fill=(25, 25, 25))
     ty += 34
@@ -2010,7 +2282,7 @@ def render_pair_report(path, target_name, target_xy, results, plot=None, tol=5.0
 
     # 峰位对照表
     rows = best.get("pair_rows", [])
-    py = bottom + 110 + 34 + 26 * (min(len(results), 8) + 1) + 26
+    py = table_top + 34 + 26 * (min(len(results), 8) + 1) + 26
     _png_text(d, f_h, (60, py), T("最佳配对峰位对照（容差 %.1f cm-1）：%s") % (tol, best["name"]),
               "la", fill=(25, 25, 25))
     py += 32
@@ -2034,6 +2306,13 @@ def render_pair_report(path, target_name, target_xy, results, plot=None, tol=5.0
                       "la", fill=(60, 60, 60))
         py += 26
     img.save(path, "PNG")
+    if return_geometry:
+        # 自测用：把图例框与两张表的位置报出去，好断言它们互不压
+        return {"legend_box": legend_box, "legend_rows": len(legend_rows),
+                "legend_pos": legend_pos, "chart": (left, top, right, bottom),
+                "table_top": table_top, "pair_top": py,
+                "width": width, "height": height}
+    return None
 
 
 _CMAP = [(0.00, (49, 54, 149)), (0.25, (69, 117, 180)), (0.50, (116, 196, 118)),
@@ -6435,6 +6714,12 @@ def _cli(args):
             formats.add("fit")
         elif low == "--despike":
             plot["despike"] = True
+        elif low in ("--legend-pos", "--legend"):
+            if i + 1 < len(args):
+                value = args[i + 1].strip().lower()
+                if value in LEGEND_POSITIONS:
+                    plot["legend_pos"] = value
+                    i += 1
         elif low == "--cluster":
             cluster_sel = True
         elif low == "--report":
@@ -7530,6 +7815,8 @@ def _run_gui():
                 "fig_width": 1600, "fig_height": 900,
                 "mineral_name": None, "stack_offset": 1.0,
             }
+            # 图例位置：全局默认存在设置文件里，下次打开还是上次摆的那个位置
+            self.adv_values["legend_pos"], self.adv_values["legend_xy"] = legend_defaults()
             self.manual_peaks = {}
             self.hidden_peaks = {}
             self._view = None
@@ -8327,6 +8614,19 @@ def _run_gui():
             fig.grid(row=4, column=0, sticky="we", padx=10, pady=4)
             add_entry(fig, "宽：", "fig_width", 0)
             add_entry(fig, "高：", "fig_height", 1)
+            legend_labels = {
+                "right": "绘图区右侧留白（不压谱线，推荐）",
+                "top": "绘图区上方",
+                "bottom": "绘图区下方",
+                "inside": "图内自由位置（可拖动）",
+                "none": "不显示图例",
+            }
+            lgvar, lginv = add_combo(fig, "图例位置：", "legend_pos", 2,
+                                     legend_labels, "right")
+            ttk.Label(fig, text="几条谱线就列几条图例；选“图内自由位置”后可以在"
+                                "叠加图预览窗口里拖着放，位置会记住",
+                      foreground="#888").grid(row=3, column=0, columnspan=3,
+                                              sticky="w", padx=8, pady=(0, 3))
 
             def apply(close=False):
                 def to_float(var, default=None):
@@ -8373,6 +8673,8 @@ def _run_gui():
                 adv["peak_dash_line"] = bool(dashvar.get())
                 adv["fig_width"] = to_int(vars_["fig_width"], 1600, 200)
                 adv["fig_height"] = to_int(vars_["fig_height"], 900, 200)
+                adv["legend_pos"] = lginv.get(lgvar.get(), "right")
+                save_legend_defaults(adv["legend_pos"], adv.get("legend_xy"))
                 if close:
                     win.destroy()
                 self.preview_selected()
@@ -9521,6 +9823,25 @@ def _run_gui():
             self._last_draw = (series, title, xlabel, ylabel) if series else None
             self._paint(series, title, xlabel, ylabel)
 
+        def _legend_measure(self):
+            """画布预览里量文字宽度的函数（字号比 PNG 导出的那个小一号）。"""
+            if getattr(self, "_leg_font", None) is None:
+                try:
+                    from tkinter import font as tkfont
+                    self._leg_font = tkfont.Font(font=("Microsoft YaHei UI", 8))
+                except Exception:
+                    self._leg_font = False
+            font = self._leg_font
+
+            def measure(text):
+                if not font:
+                    return 8.0 * len(text)
+                try:
+                    return float(font.measure(text))
+                except Exception:
+                    return 8.0 * len(text)
+            return measure
+
         def _paint(self, series, title, xlabel, ylabel):
             cv = self.canvas
             cv.delete("all")
@@ -9538,7 +9859,18 @@ def _run_gui():
             p = self.current_plot_options()
             series = [(lab, xs, _process_signal(ys, p, xs), col) for lab, xs, ys, col in series]
             ml = 76 if p["show_y_ticks"] else 46
-            mr, mt, mb = 22, 40, 48
+            mt_base, mb_base = 40, 48
+            mt, mb = mt_base, mb_base
+            base_pw = w - ml - 22
+            base_ph = h - mt - mb
+
+            # 图例跟导出图一个口径：画在绘图区外面（或用户拖到的图内位置），不压谱线
+            legend_pos = p["legend_pos"] if len(series) > 1 else "none"
+            entries, (l_right, l_top, l_bottom), l_avail = legend_fit(
+                series, self._legend_measure(), legend_pos, w, base_pw, base_ph)
+            mr = max(22, l_right)
+            mt += l_top
+            mb += l_bottom
             pw = w - ml - mr
             ph = h - mt - mb
             if pw < 20 or ph < 20:
@@ -9646,8 +9978,28 @@ def _run_gui():
                             cv.create_text(gx, ly, text=text, fill=mark_color,
                                            font=("Microsoft YaHei UI", 8), anchor="s")
 
+            legend_rows, legend_hidden, legend_box = legend_place(
+                entries, legend_pos, ml, mt, pw, ph, xy=p.get("legend_xy"),
+                avail=l_avail)
+            if legend_rows:
+                if legend_pos == "inside" and legend_box:
+                    cv.create_rectangle(*legend_box, fill="#ffffff", outline="#d8d8d8")
+                for text, color, cx, cy in legend_rows:
+                    cv.create_line(cx, cy, cx + LEGEND_SWATCH, cy, fill=color, width=2)
+                    cv.create_text(cx + LEGEND_SWATCH + LEGEND_TEXT_GAP, cy, text=text,
+                                   fill="#333", anchor="w",
+                                   font=("Microsoft YaHei UI", 8))
+                if legend_hidden > 0 and legend_box:
+                    cv.create_text(legend_box[0] + LEGEND_PAD,
+                                   legend_box[3] - LEGEND_ROW_H // 2,
+                                   text=T("…还有 %d 条") % legend_hidden,
+                                   fill="#963c3c", anchor="w",
+                                   font=("Microsoft YaHei UI", 8))
+
             if title and p["show_title"]:
-                cv.create_text(ml + pw / 2, mt - 20, text=title, fill="#222",
+                # top 位置时图例占了标题下面那一带，标题留在最上面不跟图例叠
+                ty = mt_base - 20 if (legend_pos == "top" and legend_rows) else mt - 20
+                cv.create_text(ml + pw / 2, ty, text=title, fill="#222",
                                font=("Microsoft YaHei UI", 10, "bold"))
             if xlabel:
                 cv.create_text(ml + pw / 2, mt + ph + 34, text=xlabel, fill="#333",
@@ -9655,17 +10007,6 @@ def _run_gui():
             if ylabel:
                 cv.create_text(14, mt + ph / 2, text=ylabel, fill="#333", angle=90,
                                font=("Microsoft YaHei UI", 9))
-
-            if len(series) > 1:
-                lx = ml + pw - 8
-                ly = mt + 6
-                for label, _xs, _ys, color in series[:10]:
-                    cv.create_line(lx - 34, ly + 6, lx - 18, ly + 6, fill=color, width=2)
-                    cv.create_text(lx - 14, ly + 6, text=label[:34], fill="#333", anchor="w",
-                                   font=("Microsoft YaHei UI", 8))
-                    ly += 16
-                    if ly > mt + ph - 10:
-                        break
 
         def _out_dir(self):
             if self.same_dir.get():
@@ -10961,6 +11302,28 @@ def _run_gui():
             ttk.Button(p2, text=T("刷新预览"),
                        command=lambda: refresh()).pack(side="left", padx=12)
 
+            # ---- 图例位置（可以选，也可以直接在图上把图例拖走）----
+            # lg 是当前生效的位置；拖动时写成 inside + 比例坐标，选完/拖完都存成全局默认。
+            lg = {"pos": adv.get("legend_pos") or "right", "xy": adv.get("legend_xy")}
+            legend_labels = {
+                "right": T("绘图区右侧留白（推荐）"),
+                "top": T("绘图区上方"),
+                "bottom": T("绘图区下方"),
+                "inside": T("图内自由位置（可拖动）"),
+                "none": T("不显示图例"),
+            }
+            lpos_inv = {v: k for k, v in legend_labels.items()}
+            p3 = ttk.Frame(win)
+            p3.pack(fill="x", padx=12, pady=(0, 4))
+            ttk.Label(p3, text=T("图例位置：")).pack(side="left")
+            lpos_var = tk.StringVar(
+                value=legend_labels.get(lg["pos"], legend_labels["right"]))
+            lpos_box = ttk.Combobox(p3, textvariable=lpos_var, state="readonly",
+                                    values=list(legend_labels.values()), width=22)
+            lpos_box.pack(side="left", padx=(2, 10))
+            ttk.Label(p3, text=T("（也可以在图上直接按住图例拖到想要的位置）"),
+                      foreground="#888").pack(side="left")
+
             # ---- 画布 ----
             sh = win.winfo_screenheight()
             max_h = max(300, min(600, sh - 270))
@@ -10984,7 +11347,7 @@ def _run_gui():
 
             # ---- 状态 ----
             state = {"marks": None, "geom": None, "scale": 1.0, "photo": None,
-                     "auto": []}
+                     "auto": [], "drag": None}
             tmp_png = os.path.join(tempfile.gettempdir(), "_raman_overlay_preview.png")
 
             def plot_opts():
@@ -10994,6 +11357,8 @@ def _run_gui():
                 op["show_title"] = bool(tvar.get())
                 op["stack_offset"] = _offset()
                 op["peak_merge_tol"] = _tol()
+                op["legend_pos"] = lg["pos"]
+                op["legend_xy"] = lg["xy"]
                 return op
 
             def _offset():
@@ -11138,7 +11503,67 @@ def _run_gui():
                           % (os.path.basename(dst), len(marks_now())))
                 self._show_image(dst, T(title_cn))
 
-            cw.bind("<Button-1>", on_left)
+            # ---- 图例拖动 ----
+            # 按在图例框里＝拖图例；按在别处还是“加峰位”，两者互不干扰。
+            def on_press(event):
+                g = state["geom"]
+                if g and legend_hit(g.get("legend_box"), event.x / state["scale"],
+                                    event.y / state["scale"]):
+                    box = g["legend_box"]
+                    state["drag"] = {"off": (event.x / state["scale"] - box[0],
+                                             event.y / state["scale"] - box[1]),
+                                     "box": None}
+                    tip.set(T("按住拖动图例，松手即定位。"))
+                    return
+                on_left(event)
+
+            def on_motion(event):
+                d = state["drag"]
+                g = state["geom"]
+                if not d or not g or not g.get("legend_box"):
+                    return
+                box = g["legend_box"]
+                bw, bh = box[2] - box[0], box[3] - box[1]
+                s = state["scale"]
+                ix = event.x / s - d["off"][0]
+                iy = event.y / s - d["off"][1]
+                ix = min(max(g["ml"] + 4, ix), max(g["ml"] + 4, g["ml"] + g["pw"] - bw - 4))
+                iy = min(max(g["mt"] + 4, iy), max(g["mt"] + 4, g["mt"] + g["ph"] - bh - 4))
+                d["box"] = (ix, iy, ix + bw, iy + bh)
+                cw.delete("legendghost")
+                cw.create_rectangle(ix * s, iy * s, (ix + bw) * s, (iy + bh) * s,
+                                    outline="#1a4a8a", dash=(4, 3), tags="legendghost")
+
+            def on_release(_event=None):
+                d = state["drag"]
+                state["drag"] = None
+                cw.delete("legendghost")
+                g = state["geom"]
+                if not d or not d.get("box") or not g or g["pw"] <= 0 or g["ph"] <= 0:
+                    return
+                box = d["box"]
+                lg["xy"] = [min(1.0, max(0.0, (box[0] - g["ml"]) / float(g["pw"]))),
+                            min(1.0, max(0.0, (box[1] - g["mt"]) / float(g["ph"])))]
+                lg["pos"] = "inside"
+                lpos_var.set(legend_labels["inside"])
+                adv["legend_pos"], adv["legend_xy"] = lg["pos"], lg["xy"]
+                save_legend_defaults(lg["pos"], lg["xy"])
+                refresh(T("图例已挪到图内 %.0f%% × %.0f%%（导出和下次预览都用这个位置）。")
+                        % (lg["xy"][0] * 100, lg["xy"][1] * 100))
+
+            def on_pos_pick(_event=None):
+                key = lpos_inv.get(lpos_var.get(), "right")
+                lg["pos"] = key
+                if key == "inside" and not lg["xy"]:
+                    lg["xy"] = list(LEGEND_XY_DEFAULT)
+                adv["legend_pos"], adv["legend_xy"] = lg["pos"], lg["xy"]
+                save_legend_defaults(lg["pos"], lg["xy"])
+                refresh(T("图例位置：%s") % lpos_var.get())
+
+            lpos_box.bind("<<ComboboxSelected>>", on_pos_pick)
+            cw.bind("<Button-1>", on_press)
+            cw.bind("<B1-Motion>", on_motion)
+            cw.bind("<ButtonRelease-1>", on_release)
             cw.bind("<Button-3>", on_right)
             # 勾选框即时重绘；两个输入框按回车或点【刷新预览】才重绘，
             # 免得每敲一个字符就重画一次
@@ -11540,7 +11965,7 @@ def _run_gui():
     app.mainloop()
 
 
-_MANUAL_VERSION = "2.4"
+_MANUAL_VERSION = "2.5"
 _MANUAL_TITLE = "拉曼光谱工具 · 使用说明书"
 _MANUAL_MARKER = "（说明书版本：%s）" % _MANUAL_VERSION
 _MANUAL_MARKER_EN = "(guide version: %s)" % _MANUAL_VERSION
@@ -11624,6 +12049,20 @@ k 值：||k value:
 取消||Cancel
 同时应用到导出的数据（CSV/Excel）||Also apply to exported data (CSV/Excel)
 图幅（PNG 输出像素）||Figure size (PNG pixels)
+图例位置：||Legend position:
+图例位置：%s||Legend position: %s
+绘图区右侧留白（推荐）||Right of the plot (recommended)
+绘图区右侧留白（不压谱线，推荐）||Right of the plot (never covers the spectra; recommended)
+绘图区上方||Above the plot
+绘图区下方||Below the plot
+图内自由位置（可拖动）||Free position inside the plot (draggable)
+不显示图例||Hide the legend
+（也可以在图上直接按住图例拖到想要的位置）||(You can also drag the legend anywhere on the chart)
+按住拖动图例，松手即定位。||Hold and drag the legend; release to drop it.
+图例已挪到图内 %.0f%% × %.0f%%（导出和下次预览都用这个位置）。||Legend moved inside the plot to %.0f%% x %.0f%% (used for the export and the next preview).
+几条谱线就列几条图例；选“图内自由位置”后可以在叠加图预览窗口里拖着放，位置会记住||Every spectrum gets a legend entry; pick "free position inside the plot" and drag it in the overlay preview - the position is remembered
+…还有 %d 条||...and %d more
+…还有 %d 条没列（把图例位置改到右侧留白，或把图放大）||...and %d more not shown (move the legend to the right-hand gutter, or enlarge the figure)
 图表设置||Chart settings
 在线检索数据库（ROD / RRUFF 数据）…||Search online databases (ROD / RRUFF)…
 坐标轴范围（留空 = 自动）||Axis range (blank = auto)
@@ -11972,7 +12411,6 @@ ERR 叠加图 -> %s||ERR overlay -> %s
 多数据图叠加（堆叠排布）||Multi-dataset overlay (stacked)
 堆叠偏移（瀑布图 / 叠加图）：||Stack offset (waterfall / overlay):
 0.2 ~ 2.0，1.0 = 谱线刚好不压线||0.2 ~ 2.0; 1.0 = curves just touch
-曲线超过 12 条，图例只列出前 12 条。||More than 12 curves: the legend lists only the first 12.
 生成失败：%s||Render failed: %s
 峰位虚线引到横坐标轴（自动峰 + 手动峰）||Draw a dashed line from each peak down to the x axis (auto + manual peaks)
 多数据图叠加（堆叠排布 · 预览）||Multi-dataset overlay (stacked · preview)
@@ -13110,7 +13548,7 @@ _MANUAL_SECTIONS = [
   · 化学成分包的电子探针表会原样提取到“分析结果”目录
 
 随包附带：RRUFF 未评级·非定向数据包（12 MB，639 条，含真正的
-锆石 Zircon R050034）+ 17 条已导出的参考谱，开箱即可离线检索。
+锆石 Zircon R050034）+ 20 余条已导出的参考谱，开箱即可离线检索。
 
 数据包比较大（红外 14 MB、XRD 67 MB、成分 19 MB，拉曼 12~229 MB），
 下载前工具会先检查磁盘空间，超容量上限也会提醒。
@@ -13293,17 +13731,22 @@ _MANUAL_SECTIONS = [
       用来看真实的相对强弱。
     · 可取消勾选“显示峰位数值”，只留虚线和标记 —— 十几条谱叠在一起时，
       数字会糊成一片，关掉更清爽（同样受主界面【显示峰位数值】影响）。
-    · 右侧图例标出每条曲线的来源文件名（最多列 12 条），图例带白底，
-      压在谱线上也读得清。
+    · 图例：**几条谱线就列几条**（不再只列前 12 条），放不下会自动分列；
+      默认排在**绘图区右侧的留白里**，横向跟谱线错开，谱线再密也压不到你。
+      位置可选：右侧留白 / 上方 / 下方 / 图内自由位置 / 不显示，
+      也可以在预览窗口里**直接按住图例拖到想要的位置**（松手即定位）。
+      位置会存进设置文件，导出图和下次打开都用同一个位置。
     · 打开后先出**预览窗口**：改参数、增减峰位都只重画预览，
       不点【导出 PNG】就不会往结果目录写文件。
       - 左键点图 = 在点击处加一个峰位（蓝色虚线 + 蓝色数值）；
       - 右键点虚线 = 删掉离点击处最近的峰位（自动的和手动的都能删）；
       - 【重新检测】= 丢掉全部手动改动，回到自动检测的峰位；
+      - 按住图例拖动 = 把图例挪到任意位置（按在图上别处仍然是加峰位，互不干扰）；
       - 改完参数按回车或点【刷新预览】才重画，免得每敲一个字符就重绘。
       手动增减要求勾选“峰位跨谱合并（一峰一线一值）”，
       因为只有合并模式才是“一个峰一条线一个数值”。
-      命令行 --overlay 是批处理，没有预览窗口，直接按自动检测的峰位出图。
+      命令行 --overlay 是批处理，没有预览窗口，直接按自动检测的峰位出图；
+      命令行可以用 --legend-pos right|top|bottom|inside|none 指定图例位置。
   导出为 叠加图_N条.png，存放在分析结果目录。
 
   与瀑布图的区别：瀑布图只把各条错开看“有哪些峰”；
@@ -13385,8 +13828,11 @@ _MANUAL_SECTIONS = [
   ☑ 峰标签同时显示相对强度(%)
   ☑ 峰位虚线引到横坐标轴（自动峰 + 手动峰）
 
-图幅
+图幅与图例
   PNG 输出宽 / 高（默认 1600×900）
+  图例位置：右侧留白（默认，不压谱线）/ 上方 / 下方 /
+            图内自由位置（可在叠加图预览窗口里拖着放）/ 不显示
+  几条谱线就列几条图例，放不下自动分列；图例位置会存成全局默认
 
 改完点【应用】只看效果（不关窗），点【确定】保存并关窗。"""),
 
@@ -13407,6 +13853,7 @@ _MANUAL_SECTIONS = [
   --no-peak-labels --peak-dist 20 --peak-thresh 7 --peak-label-rel
   --peak-merge 30 --no-peak-merge --stack-offset 1.0
   --fig-width 1600 --fig-height 900 --manual 1007,974
+  --legend-pos right|top|bottom|inside|none          图例位置（几条谱线列几条）
 
 预处理与归属
   --despike --despike-thresh 10 --despike-window 5
@@ -14108,10 +14555,17 @@ Pairing (manual / automatic)
                                    markers - much clearer with a dozen curves
                                    (the main panel's "Show peak values" does
                                    the same)
-                                 . the legend names the source file of each
-                                   curve (first 12 at most) and carries a white
-                                   background so it stays readable on top of
-                                   the curves
+                                 . the legend lists EVERY curve (not just the
+                                   first 12); when it does not fit it splits
+                                   into several columns. By default it sits in
+                                   a reserved gutter to the RIGHT of the plot,
+                                   so however dense the curves are it never
+                                   covers them. Choose right / above / below /
+                                   free position inside / none, or just DRAG
+                                   the legend in the preview window and drop
+                                   it where you want. The position is saved in
+                                   the settings file and reused for the export
+                                   and the next session
                                  . the dialog opens as a PREVIEW first:
                                    changing settings or editing peaks only
                                    redraws the preview - nothing is written to
@@ -14123,6 +14577,9 @@ Pairing (manual / automatic)
                                        nearest peak (auto-detected or manual)
                                      - "Re-detect" = drop every manual edit and
                                        go back to the auto-detected peaks
+                                     - hold and drag the legend = move it
+                                       anywhere (clicking elsewhere on the plot
+                                       still adds a peak)
                                      - press Enter or "Refresh preview" to
                                        redraw after typing a parameter
                                    Adding or removing peaks requires "Merge
@@ -14131,7 +14588,9 @@ Pairing (manual / automatic)
                                    line and one value per peak
                                    The command line (--overlay) is batch mode
                                    with no preview window: it draws the
-                                   auto-detected peaks straight away
+                                   auto-detected peaks straight away. Use
+                                   --legend-pos right|top|bottom|inside|none to
+                                   pick the legend position on the CLI
                                Exported as 叠加图_N条.png into the results folder.
 
                                Difference from the waterfall: the waterfall just
@@ -14188,6 +14647,11 @@ Analysis report
                     intensity with peak labels", "draw a dashed line from each
                     peak down to the x axis (auto + manual peaks)"
   Figure size       PNG pixels
+  Legend            position: right-hand gutter (default, never covers the
+                    curves) / above / below / free position inside the plot
+                    (draggable in the overlay preview) / hidden.
+                    Every curve gets an entry; extra entries wrap into more
+                    columns. The position is saved as a global default
 
   "Also apply to exported data" decides whether preprocessing is written into
   the CSV/Excel, or only used for the chart and peak detection."""),
@@ -14208,7 +14672,8 @@ Processing (same names as the advanced settings)
   --despike --baseline iterative --order 5 --iters 20
   --smooth sg --window 7 --savgol-order 2
   --deriv 1 --norm max --calib 520.6:520.7
-  --x-min 100 --x-max 2000 --tick 200 --fig-w 1600 --fig-h 900
+  --x-min 100 --x-max 2000 --tick 200 --fig-width 1600 --fig-height 900
+  --legend-pos right|top|bottom|inside|none   legend position
   --no-peaks --no-peak-dash --no-peak-labels
   --peak-merge 30 --no-peak-merge --stack-offset 1.0
   --header-custom "Wavenumber,Intensity"

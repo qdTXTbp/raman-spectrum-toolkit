@@ -1,6 +1,6 @@
 ﻿Raman Spectrum Toolkit  User Guide
 (JASCO .jws conversion - Raman peak analysis - mineral identification)
-(guide version: 2.4)
+(guide version: 2.5)
 ============================================================
 
 In one sentence:
@@ -587,10 +587,17 @@ All in the [Analysis] menu.
                                    markers - much clearer with a dozen curves
                                    (the main panel's "Show peak values" does
                                    the same)
-                                 . the legend names the source file of each
-                                   curve (first 12 at most) and carries a white
-                                   background so it stays readable on top of
-                                   the curves
+                                 . the legend lists EVERY curve (not just the
+                                   first 12); when it does not fit it splits
+                                   into several columns. By default it sits in
+                                   a reserved gutter to the RIGHT of the plot,
+                                   so however dense the curves are it never
+                                   covers them. Choose right / above / below /
+                                   free position inside / none, or just DRAG
+                                   the legend in the preview window and drop
+                                   it where you want. The position is saved in
+                                   the settings file and reused for the export
+                                   and the next session
                                  . the dialog opens as a PREVIEW first:
                                    changing settings or editing peaks only
                                    redraws the preview - nothing is written to
@@ -602,6 +609,9 @@ All in the [Analysis] menu.
                                        nearest peak (auto-detected or manual)
                                      - "Re-detect" = drop every manual edit and
                                        go back to the auto-detected peaks
+                                     - hold and drag the legend = move it
+                                       anywhere (clicking elsewhere on the plot
+                                       still adds a peak)
                                      - press Enter or "Refresh preview" to
                                        redraw after typing a parameter
                                    Adding or removing peaks requires "Merge
@@ -610,7 +620,9 @@ All in the [Analysis] menu.
                                    line and one value per peak
                                    The command line (--overlay) is batch mode
                                    with no preview window: it draws the
-                                   auto-detected peaks straight away
+                                   auto-detected peaks straight away. Use
+                                   --legend-pos right|top|bottom|inside|none to
+                                   pick the legend position on the CLI
                                Exported as 叠加图_N条.png into the results folder.
 
                                Difference from the waterfall: the waterfall just
@@ -679,6 +691,11 @@ Analysis report
                     intensity with peak labels", "draw a dashed line from each
                     peak down to the x axis (auto + manual peaks)"
   Figure size       PNG pixels
+  Legend            position: right-hand gutter (default, never covers the
+                    curves) / above / below / free position inside the plot
+                    (draggable in the overlay preview) / hidden.
+                    Every curve gets an entry; extra entries wrap into more
+                    columns. The position is saved as a global default
 
   "Also apply to exported data" decides whether preprocessing is written into
   the CSV/Excel, or only used for the chart and peak detection.
@@ -703,7 +720,8 @@ Processing (same names as the advanced settings)
   --despike --baseline iterative --order 5 --iters 20
   --smooth sg --window 7 --savgol-order 2
   --deriv 1 --norm max --calib 520.6:520.7
-  --x-min 100 --x-max 2000 --tick 200 --fig-w 1600 --fig-h 900
+  --x-min 100 --x-max 2000 --tick 200 --fig-width 1600 --fig-height 900
+  --legend-pos right|top|bottom|inside|none   legend position
   --no-peaks --no-peak-dash --no-peak-labels
   --peak-merge 30 --no-peak-merge --stack-offset 1.0
   --header-custom "Wavenumber,Intensity"
